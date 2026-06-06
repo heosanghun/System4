@@ -200,34 +200,31 @@ class System4Swarm(nn.Module):
         Returns coupling tensor of shape (B, 28, 256)
         """
         batch_size = Z.size(0)
-        # Reshape Z to (B, 28, 256)
         Z_reshaped = Z.view(batch_size, 28, self.d)
         
-        # Initialize couplings to 0
-        C = torch.zeros(batch_size, 28, self.d, device=Z.device)
+        # Get active edges: shape (NumEdges, 2) where each row is (i_target, j_source)
+        targets, sources = torch.nonzero(M, as_tuple=True)
         
-        # Compute couplings using the active edges in M
-        # c_i = sum_{j} M_ij * W_ij * z_j
-        for i in range(28):
-            incoming_idx = torch.where(M[i] == 1.0)[0]
-            if len(incoming_idx) == 0:
-                continue
-                
-            # Collect states of all incoming neighbors: shape (B, len(incoming), 256)
-            z_neighbors = Z_reshaped[:, incoming_idx, :]
+        if len(targets) == 0:
+            return torch.zeros(batch_size, 28, self.d, device=Z.device)
             
-            # Apply their specific interaction weight matrices W_ij
-            for idx, j_node in enumerate(incoming_idx.cpu().numpy()):
-                w_idx = self.edge_to_w_idx[(j_node, i)]
-                W = self.W_bank[w_idx] # (256, 256)
-                
-                # Compute W * z_j: shape (B, 256)
-                z_j = z_neighbors[:, idx, :] # (B, 256)
-                c_ij = torch.matmul(z_j, W.t()) # (B, 256)
-                
-                # Add to coupling of agent i
-                C[:, i, :] += c_ij
-                
+        # Get the weight indices for these active edges
+        w_indices = (targets + sources) % 7
+        
+        # Gather the weight matrices: shape (NumEdges, 256, 256)
+        W_edges = self.W_bank[w_indices]
+        
+        # Gather the source states: shape (B, NumEdges, 256)
+        z_sources = Z_reshaped[:, sources, :]
+        
+        # Compute W_ij * z_j: shape (B, NumEdges, 256)
+        c_edges = torch.matmul(z_sources.unsqueeze(-2), W_edges.transpose(-1, -2)).squeeze(-2)
+        
+        # Scatter add to the coupling tensor: shape (B, 28, 256)
+        C = torch.zeros(batch_size, 28, self.d, device=Z.device)
+        targets_expanded = targets.unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, self.d)
+        C.scatter_add_(1, targets_expanded, c_edges)
+        
         return C
 
     def forward_system_equations(self, Z: torch.Tensor, x: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
