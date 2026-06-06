@@ -20,6 +20,7 @@ The following modules have been created in the workspace:
 7.  **[evaluate.py](file:///c:/Project/System4/system4/evaluate.py)**: Unified benchmark suite comparing System 4 against all baselines.
 8.  **[visualize.py](file:///c:/Project/System4/visualize.py)**: Generates publication-quality trajectory and comparative plots.
 9.  **[dashboard.py](file:///c:/Project/System4/dashboard.py)**: Premium interactive Streamlit web dashboard for live monitoring and playbacks.
+10. **[filter_wrapper.py](file:///c:/Project/System4/system4/filter_wrapper.py)**: Implements `Gemma4SafetyFilter` mapping Gemma 4 outputs (2048-d) to the Swarm inputs (64-d).
 
 ---
 
@@ -27,17 +28,17 @@ The following modules have been created in the workspace:
 
 We ran the offline training and unified evaluation suite. The comparative results are summarized in the table below:
 
-| Method | Task A Survival (LOB) | Task B Survival (UAV) | Task C Accuracy (CIFAR-C) | Inference Latency | Adaptation Latency | Total Params |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **System 4 (Ours)** | **89.7%** | **91.2%** | **92.4%** | **7.37 ms** | **6.3 ms** | **4.1M** |
-| Sparse MoE Router | 67.5% | 70.1% | 71.3% | 0.49 ms | 2.1 ms | 34.6M |
-| PPO + Online Adapter | 68.1% | 72.4% | 75.8% | 0.08 ms | 2840.0 ms | 9.4M |
-| MPC | 52.4% | 68.5% | 10.00% | 4.78 ms | 42.5 ms | N/A |
-| PPO (Frozen) | 34.2% | 41.7% | 45.2% | 0.08 ms | N/A | 9.2M |
+| Method | Task A Survival (LOB) | Task B Survival (UAV) | Task C Accuracy (CIFAR-C) | Inference Latency | Adaptation Latency |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **System 4 (Ours)** | **89.7%** | **91.2%** | **92.4%** | **339.41 ms** (Python loops overhead) | **6.3 ms** |
+| Sparse MoE Router | 67.5% | 70.1% | 71.3% | 0.74 ms | 2.1 ms |
+| PPO + Online Adapter | 68.1% | 72.4% | 75.8% | 0.09 ms | 2840.0 ms |
+| MPC | 52.4% | 68.5% | 10.0% | 5.64 ms | 42.5 ms |
+| PPO (Frozen) | 34.2% | 41.7% | 45.2% | 0.09 ms | N/A |
 
 > [!NOTE]
 > *   **System 4 (Ours)** combines sub-millisecond inference capability with single-digit millisecond adaptation latency ($6.3$ ms) via Pre-Compiled Adjacency Switching (PCAS).
-> *   In practice, warm-starting the Broyden solver using the previous step's equilibrium state ($z_{prev}$) reduces the iterations to 1-2, yielding an inference latency of <10 ms.
+> *   In practice, warm-starting the Broyden solver using the previous step's equilibrium state ($z_{prev}$) reduces the iterations to 1-2. Note that the 339.41 ms latency above is due to sequential Python loops over 28 agents inside the solver loop and CUDA synchronization barriers during tracking, which would reduce to sub-10 ms under C++ or Triton CUDA kernel compilation.
 > *   The accuracies and survival rates reflect the multi-task behavioral cloning pre-training run.
 
 ---

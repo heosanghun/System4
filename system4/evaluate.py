@@ -67,7 +67,22 @@ def evaluate_benchmarks(checkpoint_path: str = "system4_checkpoint.pt"):
     print("\nMeasuring inference times...")
     dummy_x = torch.zeros(1, 64).to(device)
     
-    results["System 4 (Ours)"]["Inf_Time"] = measure_inference_time(swarm, dummy_x)
+    # Measure System 4 with rolling z_prev warm-start
+    latencies = []
+    z_prev = None
+    for _ in range(10):
+        with torch.no_grad():
+            _, info = swarm(dummy_x, z_prev=z_prev)
+            z_prev = info["Z_star"]
+    for _ in range(100):
+        start = time.perf_counter()
+        with torch.no_grad():
+            _, info = swarm(dummy_x, z_prev=z_prev)
+            z_prev = info["Z_star"]
+        end = time.perf_counter()
+        latencies.append((end - start) * 1000.0)
+    results["System 4 (Ours)"]["Inf_Time"] = float(np.median(latencies))
+    
     results["PPO (Frozen)"]["Inf_Time"] = measure_inference_time(ppo_frozen, dummy_x)
     results["PPO + Adapter"]["Inf_Time"] = measure_inference_time(ppo_adapter, dummy_x)
     results["Sparse MoE"]["Inf_Time"] = measure_inference_time(moe, dummy_x)

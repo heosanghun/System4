@@ -69,7 +69,7 @@ def generate_synthetic_normal_data(classes: int = 10, d_in: int = 64, n_samples:
         
     return torch.from_numpy(np.array(features, dtype=np.float32)), torch.tensor(labels, dtype=torch.long)
 
-def train_system4(epochs: int = 3, batch_size: int = 64, lr: float = 3e-4, checkpoint_path: str = "system4_checkpoint.pt"):
+def train_system4(epochs: int = 5, batch_size: int = 8, lr: float = 3e-4, checkpoint_path: str = "system4_checkpoint.pt"):
     print("=== Phase 7: Starting Multi-Task Behavioral Cloning for System 4 ===")
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -87,6 +87,9 @@ def train_system4(epochs: int = 3, batch_size: int = 64, lr: float = 3e-4, check
     
     # 2. Initialize Swarm
     swarm = System4Swarm(d_in=64, d=256, gamma=0.98, warm_up_steps=100).to(device)
+    # Set low iterations for training stability and memory footprint reduction
+    swarm.solver.max_iter = 15
+    
     class_head = nn.Linear(256, 10).to(device)
     
     # 3. Setup optimizer
@@ -120,20 +123,19 @@ def train_system4(epochs: int = 3, batch_size: int = 64, lr: float = 3e-4, check
             latent_a, _ = swarm(xa)
             pred_a = torch.tanh(latent_a[:, :4])
             loss_a = mse_criterion(pred_a, ya)
+            loss_a.backward()
             
             # --- Task B: Turbulence (Action shape B, 2) ---
             latent_b, _ = swarm(xb)
             pred_b = torch.tanh(latent_b[:, :2])
             loss_b = mse_criterion(pred_b, yb)
+            loss_b.backward()
             
             # --- Task C: Classification (CrossEntropy) ---
             latent_c, _ = swarm(xc)
             logits_c = class_head(latent_c)
             loss_c = ce_criterion(logits_c, yc)
-            
-            # Joint Loss
-            loss = loss_a + loss_b + loss_c
-            loss.backward()
+            loss_c.backward()
             
             torch.nn.utils.clip_grad_norm_(swarm.parameters(), max_norm=1.0)
             optimizer.step()
@@ -141,6 +143,10 @@ def train_system4(epochs: int = 3, batch_size: int = 64, lr: float = 3e-4, check
             loss_a_total += loss_a.item()
             loss_b_total += loss_b.item()
             loss_c_total += loss_c.item()
+            
+            # Clear CUDA cache to prevent accumulation
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
             
         print(f"Epoch {epoch+1:02d}/{epochs:02d} | Task A MSE: {loss_a_total:.4f} | Task B MSE: {loss_b_total:.4f} | Task C CE: {loss_c_total:.4f}")
         

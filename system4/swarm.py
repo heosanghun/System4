@@ -288,11 +288,23 @@ class System4Swarm(nn.Module):
         else:
             z_init = z_prev.clone()
             
+        # Enable static caching for all agent linear layers
+        for agent in self.agents:
+            agent.fc1._use_static_cache = True
+            agent.fc2._use_static_cache = True
+            
         # Solve for fixed point Z* = G(Z*)
         # We define G(Z) as a lambda function holding x and M fixed
         g_func = lambda Z: self.forward_system_equations(Z, x, M)
         
         Z_star, solver_info = self.solver.solve(g_func, z_init)
+        
+        # Disable static caching and clear cache
+        for agent in self.agents:
+            agent.fc1._use_static_cache = False
+            agent.fc2._use_static_cache = False
+            agent.fc1._cached_w_constrained = None
+            agent.fc2._cached_w_constrained = None
         
         # 3. Extract actions from the 7 Constraint Projectors (nodes 21-27)
         # We average the state vectors of the 7 constraint agents to project to output

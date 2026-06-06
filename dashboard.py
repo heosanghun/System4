@@ -145,11 +145,13 @@ with tab1:
         progress_bar = st.progress(0)
         
         # Run step-by-step
+        z_prev = None
         for step in range(sim_duration):
             x_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
             with torch.no_grad():
-                # Forward pass through System 4
-                latent, info = swarm(x_tensor)
+                # Forward pass through System 4 with warm-start
+                latent, info = swarm(x_tensor, z_prev=z_prev)
+                z_prev = info["Z_star"]
                 
                 # Get environment action
                 if "Task A" in task:

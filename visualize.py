@@ -38,10 +38,12 @@ def generate_visualization_plots(checkpoint_path: str = "system4_checkpoint.pt",
     
     done = False
     step_cnt = 0
+    z_prev = None
     while not done:
         x_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
         with torch.no_grad():
-            latent, info = swarm(x_tensor)
+            latent, info = swarm(x_tensor, z_prev=z_prev)
+            z_prev = info["Z_star"]
             action = torch.tanh(latent[:, :4]).squeeze(0).cpu().numpy()
             
         obs, reward, done, info_env = env_a.step(action)
@@ -107,10 +109,12 @@ def generate_visualization_plots(checkpoint_path: str = "system4_checkpoint.pt",
     
     done = False
     step_cnt = 0
+    z_prev = None
     while not done:
         x_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
         with torch.no_grad():
-            latent, info = swarm(x_tensor)
+            latent, info = swarm(x_tensor, z_prev=z_prev)
+            z_prev = info["Z_star"]
             action = torch.tanh(latent[:, :2]).squeeze(0).cpu().numpy()
             
         obs, reward, done, info_env = env_b.step(action)

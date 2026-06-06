@@ -55,13 +55,17 @@ class SpectralNormLinear(nn.Linear):
         return self.weight
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self.training:
-            if not hasattr(self, '_cached_w_constrained') or self._cached_w_constrained is None:
-                self._cached_w_constrained = self.get_constrained_weight()
-            w_constrained = self._cached_w_constrained
+        if hasattr(self, '_use_static_cache') and self._use_static_cache:
+            if not hasattr(self, '_cached_w_constrained') or getattr(self, '_cached_w_constrained') is None:
+                object.__setattr__(self, '_cached_w_constrained', self.get_constrained_weight())
+            w_constrained = getattr(self, '_cached_w_constrained')
+        elif not self.training:
+            if not hasattr(self, '_cached_w_constrained') or getattr(self, '_cached_w_constrained') is None:
+                object.__setattr__(self, '_cached_w_constrained', self.get_constrained_weight())
+            w_constrained = getattr(self, '_cached_w_constrained')
         else:
             if hasattr(self, '_cached_w_constrained'):
-                self._cached_w_constrained = None
+                object.__setattr__(self, '_cached_w_constrained', None)
             w_constrained = self.get_constrained_weight()
         return F.linear(x, w_constrained, self.bias)
 
