@@ -78,6 +78,13 @@ def load_swarm_model(path):
     swarm = System4Swarm(d_in=64, d=256, gamma=0.98, warm_up_steps=100).to(device)
     swarm.load_state_dict(checkpoint['swarm_state_dict'])
     swarm.eval()
+    
+    # Try compiling the swarm model to reduce latency
+    try:
+        print("Compiling Swarm Model for Streamlit Dashboard...")
+        swarm = torch.compile(swarm, mode="reduce-overhead")
+    except Exception as e:
+        print(f"Compilation skipped: {e}")
     return swarm
 
 swarm = load_swarm_model(checkpoint_path)
@@ -164,7 +171,8 @@ with tab1:
             
             # Log metrics
             steps_hist.append(step)
-            regime_hist.append(info["regime_code"])
+            current_regime_code = int(info["regime_code"].item())
+            regime_hist.append(current_regime_code)
             
             # Compute current Mahalanobis distance for display
             if swarm.is_calibrated.item():
@@ -175,14 +183,15 @@ with tab1:
                 dist = 1.0 # default before calibration
             dist_hist.append(dist)
             
+            regime_name = "Crisis" if current_regime_code == 1 else "Normal"
             if "Task A" in task:
                 val_hist.append(info_env["portfolio_value"])
                 ref_hist.append(env.mid_price)
-                status_text = f"Regime: {info['regime']} | Value: ${info_env['portfolio_value']:.2f} | Drawdown: {info_env['drawdown']*100:.2f}%"
+                status_text = f"Regime: {regime_name} | Value: ${info_env['portfolio_value']:.2f} | Drawdown: {info_env['drawdown']*100:.2f}%"
             else:
                 val_hist.append(max(abs(info_env["roll_deg"]), abs(info_env["pitch_deg"])))
                 ref_hist.append(info_env["wind"])
-                status_text = f"Regime: {info['regime']} | Max Deviation: {max(abs(info_env['roll_deg']), abs(info_env['pitch_deg'])):.2f}° | Wind: {info_env['wind']:.1f} m/s"
+                status_text = f"Regime: {regime_name} | Max Deviation: {max(abs(info_env['roll_deg']), abs(info_env['pitch_deg'])):.2f}° | Wind: {info_env['wind']:.1f} m/s"
                 
             progress_bar.progress((step + 1) / sim_duration)
             
@@ -220,7 +229,7 @@ with tab1:
             plt.close()
             
             # Update Metrics
-            regime_badge = '<span class="regime-crisis">🚨 CRISIS REGIME</span>' if info["regime_code"] == 1 else '<span class="regime-normal">❇️ NORMAL REGIME</span>'
+            regime_badge = '<span class="regime-crisis">🚨 CRISIS REGIME</span>' if current_regime_code == 1 else '<span class="regime-normal">❇️ NORMAL REGIME</span>'
             metrics_placeholder.markdown(f"""
             <div style="display: flex; gap: 20px;">
                 <div class="metric-card" style="flex: 1;">

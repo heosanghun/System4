@@ -183,13 +183,12 @@ class System4Swarm(nn.Module):
             temp = torch.matmul(diff, self.cov_inv)
             # Dot product along feature dimension
             dist = torch.sqrt(torch.sum(temp * diff, dim=-1)) # (B,)
-            mean_dist = dist.mean().item()
+            mean_dist = dist.mean() # Keep as tensor to prevent CPU block
             
-            # PCAS trigger: swap adjacency matrix pointer if mean_dist > threshold
-            if mean_dist > self.threshold.item():
-                self.active_regime.copy_(torch.tensor(1, dtype=torch.long, device=x.device)) # Crisis
-            else:
-                self.active_regime.copy_(torch.tensor(0, dtype=torch.long, device=x.device)) # Normal
+            # PCAS trigger purely on GPU
+            is_crisis = mean_dist > self.threshold
+            new_regime = torch.where(is_crisis, torch.tensor(1, dtype=torch.long, device=x.device), torch.tensor(0, dtype=torch.long, device=x.device))
+            self.active_regime.copy_(new_regime)
 
     def _compute_coupling(self, Z: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
         """
@@ -227,13 +226,33 @@ class System4Swarm(nn.Module):
         
         return C
 
-    def forward_system_equations(self, Z: torch.Tensor, x: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
-        """
-        Computes G(Z) for the joint fixed-point equation Z_next = G(Z).
-        Z: concatenated states of shape (B, 28 * 256)
-        x: raw environment observations of shape (B, d_in)
-        M: active adjacency matrix of shape (28, 28)
-        """
+    def _get_agent_weights(self):
+        W1_list = []
+        B1_list = []
+        W2_list = []
+        B2_list = []
+        for agent in self.agents:
+            w1 = getattr(agent.fc1, '_cached_w_constrained', None)
+            if w1 is None:
+                w1 = agent.fc1.get_constrained_weight()
+            W1_list.append(w1)
+            B1_list.append(agent.fc1.bias)
+            
+            w2 = getattr(agent.fc2, '_cached_w_constrained', None)
+            if w2 is None:
+                w2 = agent.fc2.get_constrained_weight()
+            W2_list.append(w2)
+            B2_list.append(agent.fc2.bias)
+            
+        W1_all = torch.stack(W1_list) # (28, d, d)
+        B1_all = torch.stack(B1_list) # (28, d)
+        W2_all = torch.stack(W2_list) # (28, d, d)
+        B2_all = torch.stack(B2_list) # (28, d)
+        return W1_all, B1_all, W2_all, B2_all
+
+    def forward_system_equations_vectorized(self, Z: torch.Tensor, x: torch.Tensor, M: torch.Tensor, 
+                                            W1_all: torch.Tensor, B1_all: torch.Tensor, 
+                                            W2_all: torch.Tensor, B2_all: torch.Tensor) -> torch.Tensor:
         batch_size = Z.size(0)
         Z_reshaped = Z.view(batch_size, 28, self.d)
         
@@ -245,14 +264,36 @@ class System4Swarm(nn.Module):
         for i in range(11):
             proj_X[:, i, :] = self.proj_layers[i](x)
             
-        # 3. Compute next states for all 28 agents
+        # 3. Sum state, coupling, and observation
+        h = Z_reshaped + C + proj_X
+        
+        # 4. Batched linear layer 1: h1 = h @ W1^T + bias
+        h1 = torch.einsum("bni,noi->bno", h, W1_all) + B1_all.unsqueeze(0)
+        h1_act = F.relu(h1)
+        
+        # 5. Batched linear layer 2
+        Z_next = torch.einsum("bni,noi->bno", h1_act, W2_all) + B2_all.unsqueeze(0)
+        
+        return Z_next.view(batch_size, 28 * self.d)
+
+    def forward_system_equations(self, Z: torch.Tensor, x: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
+        batch_size = Z.size(0)
+        Z_reshaped = Z.view(batch_size, 28, self.d)
+        
+        # 1. Compute continuous coupling tensors c_i for all agents
+        C = self._compute_coupling(Z, M)
+        
+        # 2. Compute observation projections for sensory agents
+        proj_X = torch.zeros(batch_size, 28, self.d, device=Z.device)
+        for i in range(11):
+            proj_X[:, i, :] = self.proj_layers[i](x)
+            
+        # 3. Compute next states for all 28 agents sequentially (standard path fallback)
         Z_next = torch.zeros(batch_size, 28, self.d, device=Z.device)
         for i in range(28):
             z_i = Z_reshaped[:, i, :]
             c_i = C[:, i, :]
             proj_xi = proj_X[:, i, :]
-            
-            # Forward pass through agent i
             Z_next[:, i, :] = self.agents[i](z_i, c_i, proj_xi)
             
         # Flatten to shape (B, 28 * 256)
@@ -261,8 +302,8 @@ class System4Swarm(nn.Module):
     def forward(self, x: torch.Tensor, z_prev: torch.Tensor = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
         Main forward pass of System 4 Swarm:
-        1. Updates Mahalanobis monitor and dynamically swaps topology (PCAS)
-        2. Solves for the joint fixed point Z* using Global Broyden Solver
+        1. Updates Mahalanobis monitor and dynamically swaps topology (PCAS) purely on GPU
+        2. Solves for the joint fixed point Z* using Global Broyden Solver with vectorized agents
         3. Extracts actions from the Constraint Projectors
         
         x: raw environment observations of shape (B, d_in)
@@ -274,30 +315,30 @@ class System4Swarm(nn.Module):
         # 1. Anomaly monitoring & PCAS topology switching
         self.update_mahalanobis_monitor(x)
         
-        # Select active adjacency matrix
-        if self.active_regime.item() == 1:
-            M = self.M_crisis
-            regime_name = "Crisis"
-        else:
-            M = self.M_normal
-            regime_name = "Normal"
+        # Select active adjacency matrix purely on GPU
+        regime_float = self.active_regime.float()
+        M = (1.0 - regime_float) * self.M_normal + regime_float * self.M_crisis
             
-        # 2. Initialize fixed-point search
+        # 2. Initialize fixed-point search and select fixed solver iteration count
         if z_prev is None:
             z_init = torch.zeros(batch_size, 28 * self.d, device=device)
+            fixed_iter = 15 # Cold start
         else:
             z_init = z_prev.clone()
+            fixed_iter = 8  # Warm start
             
         # Enable static caching for all agent linear layers
         for agent in self.agents:
             agent.fc1._use_static_cache = True
             agent.fc2._use_static_cache = True
             
-        # Solve for fixed point Z* = G(Z*)
-        # We define G(Z) as a lambda function holding x and M fixed
-        g_func = lambda Z: self.forward_system_equations(Z, x, M)
+        # Cache and stack weight parameters once before Solver loop to avoid loop overhead
+        W1_all, B1_all, W2_all, B2_all = self._get_agent_weights()
+            
+        # Solve for fixed point Z* = G(Z*) using vectorized system equations
+        g_func = lambda Z: self.forward_system_equations_vectorized(Z, x, M, W1_all, B1_all, W2_all, B2_all)
         
-        Z_star, solver_info = self.solver.solve(g_func, z_init)
+        Z_star, solver_info = self.solver.solve(g_func, z_init, fixed_iter=fixed_iter)
         
         # Disable static caching and clear cache
         for agent in self.agents:
@@ -307,18 +348,13 @@ class System4Swarm(nn.Module):
             agent.fc2._cached_w_constrained = None
         
         # 3. Extract actions from the 7 Constraint Projectors (nodes 21-27)
-        # We average the state vectors of the 7 constraint agents to project to output
         Z_star_reshaped = Z_star.view(batch_size, 28, self.d)
         constraint_states = Z_star_reshaped[:, 21:28, :] # shape (B, 7, 256)
         
-        # Average across the 7 constraint agents and project to a small action dimension (say 4)
-        # In actual environments, we will have a dedicated action head or let the controller baseline
-        # map constraint states directly. Let's output the average representation as the joint latent action.
         latent_action = torch.mean(constraint_states, dim=1) # shape (B, 256)
         
         info = {
-            "regime": regime_name,
-            "regime_code": self.active_regime.item(),
+            "regime_code": self.active_regime, # Keep as GPU tensor
             "solver": solver_info,
             "Z_star": Z_star
         }

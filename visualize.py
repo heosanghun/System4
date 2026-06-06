@@ -23,6 +23,16 @@ def generate_visualization_plots(checkpoint_path: str = "system4_checkpoint.pt",
     swarm.load_state_dict(checkpoint['swarm_state_dict'])
     swarm.eval()
     
+    print("Compiling Swarm Model for visualization...")
+    compiled_swarm = torch.compile(swarm, mode="reduce-overhead")
+    try:
+        dummy_test = torch.zeros(1, 64).to(device)
+        _ = compiled_swarm(dummy_test)
+        print("Compilation successful!")
+    except Exception as e:
+        print(f"JIT Compilation failed/Triton missing ({e}). Falling back to standard model.")
+        compiled_swarm = swarm
+    
     # ----------------------------------------------------
     # 1. Run & Plot Task A (Flash Crash Trajectory)
     # ----------------------------------------------------
@@ -42,7 +52,7 @@ def generate_visualization_plots(checkpoint_path: str = "system4_checkpoint.pt",
     while not done:
         x_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
         with torch.no_grad():
-            latent, info = swarm(x_tensor, z_prev=z_prev)
+            latent, info = compiled_swarm(x_tensor, z_prev=z_prev)
             z_prev = info["Z_star"]
             action = torch.tanh(latent[:, :4]).squeeze(0).cpu().numpy()
             
@@ -52,7 +62,7 @@ def generate_visualization_plots(checkpoint_path: str = "system4_checkpoint.pt",
         prices.append(env_a.mid_price)
         values.append(env_a.cash + env_a.inventory * env_a.mid_price)
         drawdowns.append(info_env["drawdown"] * 100.0) # in %
-        regimes.append(info["regime_code"])
+        regimes.append(int(info["regime_code"].item()))
         
         step_cnt += 1
         
@@ -113,7 +123,7 @@ def generate_visualization_plots(checkpoint_path: str = "system4_checkpoint.pt",
     while not done:
         x_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
         with torch.no_grad():
-            latent, info = swarm(x_tensor, z_prev=z_prev)
+            latent, info = compiled_swarm(x_tensor, z_prev=z_prev)
             z_prev = info["Z_star"]
             action = torch.tanh(latent[:, :2]).squeeze(0).cpu().numpy()
             
@@ -123,7 +133,7 @@ def generate_visualization_plots(checkpoint_path: str = "system4_checkpoint.pt",
         rolls.append(info_env["roll_deg"])
         pitches.append(info_env["pitch_deg"])
         winds.append(info_env["wind"])
-        regimes.append(info["regime_code"])
+        regimes.append(int(info["regime_code"].item()))
         
         step_cnt += 1
         

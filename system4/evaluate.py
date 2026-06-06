@@ -41,6 +41,17 @@ def evaluate_benchmarks(checkpoint_path: str = "system4_checkpoint.pt"):
     swarm.load_state_dict(checkpoint['swarm_state_dict'])
     swarm.eval()
     
+    print("Compiling System 4 Swarm (torch.compile)...")
+    compiled_swarm = torch.compile(swarm, mode="reduce-overhead")
+    try:
+        print("Testing compilation with a dry run...")
+        dummy_test = torch.zeros(1, 64).to(device)
+        _ = compiled_swarm(dummy_test)
+        print("Compilation successful! JIT compiler is active.")
+    except Exception as e:
+        print(f"JIT Compilation failed/Triton missing ({e}). Falling back to standard model.")
+        compiled_swarm = swarm
+    
     class_head = nn.Linear(256, 10).to(device)
     class_head.load_state_dict(checkpoint['class_head_state_dict'])
     class_head.eval()
@@ -67,17 +78,20 @@ def evaluate_benchmarks(checkpoint_path: str = "system4_checkpoint.pt"):
     print("\nMeasuring inference times...")
     dummy_x = torch.zeros(1, 64).to(device)
     
-    # Measure System 4 with rolling z_prev warm-start
+    # Warm-up / Trigger JIT compilation (15 steps)
     latencies = []
     z_prev = None
-    for _ in range(10):
+    print("Running JIT Warm-up for compiled model...")
+    for _ in range(15):
         with torch.no_grad():
-            _, info = swarm(dummy_x, z_prev=z_prev)
+            _, info = compiled_swarm(dummy_x, z_prev=z_prev)
             z_prev = info["Z_star"]
+            
+    # Measure System 4 with rolling z_prev warm-start
     for _ in range(100):
         start = time.perf_counter()
         with torch.no_grad():
-            _, info = swarm(dummy_x, z_prev=z_prev)
+            _, info = compiled_swarm(dummy_x, z_prev=z_prev)
             z_prev = info["Z_star"]
         end = time.perf_counter()
         latencies.append((end - start) * 1000.0)
@@ -107,7 +121,7 @@ def evaluate_benchmarks(checkpoint_path: str = "system4_checkpoint.pt"):
     obs = env_a.reset()
     x_tensor = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0).to(device)
     with torch.no_grad():
-        latent, info = swarm(x_tensor)
+        latent, info = compiled_swarm(x_tensor)
         _ = torch.tanh(latent[:, :4]).squeeze(0).cpu().numpy()
         _ = ppo_frozen(x_tensor).squeeze(0).cpu().numpy()
         _ = moe(x_tensor).squeeze(0).cpu().numpy()
@@ -118,7 +132,7 @@ def evaluate_benchmarks(checkpoint_path: str = "system4_checkpoint.pt"):
     obs = env_b.reset()
     x_tensor = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0).to(device)
     with torch.no_grad():
-        latent, info = swarm(x_tensor)
+        latent, info = compiled_swarm(x_tensor)
         _ = torch.tanh(latent[:, :2]).squeeze(0).cpu().numpy()
         _ = ppo_frozen(x_tensor)[:, :2].squeeze(0).cpu().numpy()
         _ = moe(x_tensor)[:, :2].squeeze(0).cpu().numpy()
@@ -129,7 +143,7 @@ def evaluate_benchmarks(checkpoint_path: str = "system4_checkpoint.pt"):
     obs, _, _, _ = env_c.reset()
     x_tensor = torch.from_numpy(obs.astype(np.float32)).unsqueeze(0).to(device)
     with torch.no_grad():
-        latent, info = swarm(x_tensor)
+        latent, info = compiled_swarm(x_tensor)
         _ = class_head(latent).squeeze(0)
         _ = moe(x_tensor).squeeze(0).cpu().numpy()
         

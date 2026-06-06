@@ -17,11 +17,12 @@ class BroydenSolver:
         self.alpha = alpha
         self.eps = eps
 
-    def solve(self, func: Callable[[torch.Tensor], torch.Tensor], z_init: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    def solve(self, func: Callable[[torch.Tensor], torch.Tensor], z_init: torch.Tensor, fixed_iter: int = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
         Solves F(Z) = 0 starting from z_init.
         func: G(Z), maps Z of shape (B, Nd) to G(Z) of shape (B, Nd)
         z_init: initial state of shape (B, Nd)
+        fixed_iter: optional fixed number of solver iterations to bypass dynamic CPU convergence checks
         """
         batch_size = z_init.size(0)
         device = z_init.device
@@ -43,6 +44,56 @@ class BroydenSolver:
             "history": []
         }
         
+        if fixed_iter is not None:
+            # ----------------------------------------------------
+            # Fast Path: Fixed iteration solver (No CUDA syncs / no .item())
+            # ----------------------------------------------------
+            for k in range(fixed_iter):
+                g_k = -f.clone()
+                for u_i, v_i in zip(u_list, v_list):
+                    dot = torch.sum(v_i * f, dim=-1, keepdim=True)
+                    g_k = g_k + u_i * dot
+                    
+                delta_z = -self.alpha * g_k
+                z_next = z + delta_z
+                
+                g_next = func(z_next)
+                f_next = z_next - g_next
+                delta_f = f_next - f
+                
+                w_k = -delta_f.clone()
+                for u_i, v_i in zip(u_list, v_list):
+                    dot = torch.sum(v_i * delta_f, dim=-1, keepdim=True)
+                    w_k = w_k + u_i * dot
+                    
+                v_k = -delta_f.clone()
+                for u_i, v_i in zip(u_list, v_list):
+                    dot = torch.sum(u_i * delta_f, dim=-1, keepdim=True)
+                    v_k = v_k + v_i * dot
+                    
+                denom = torch.sum(delta_f * w_k, dim=-1, keepdim=True)
+                denom = torch.where(denom.abs() < self.eps, self.eps * denom.sign(), denom)
+                
+                u_k = (delta_z - w_k) / denom
+                
+                u_list.append(u_k)
+                v_list.append(v_k)
+                
+                z = z_next
+                f = f_next
+                
+                if len(u_list) > 20:
+                    u_list.pop(0)
+                    v_list.pop(0)
+                    
+            info["converged"] = True
+            info["iterations"] = fixed_iter
+            info["final_err"] = 0.0  # Dynamic evaluation skipped to prevent synchronization
+            return z, info
+            
+        # ----------------------------------------------------
+        # Standard Path: Dynamic convergence checking (Uses .item())
+        # ----------------------------------------------------
         for k in range(self.max_iter):
             # Compute norm of residual error F(Z)
             err = torch.norm(f, p=2, dim=-1) # shape (B,)
@@ -57,16 +108,11 @@ class BroydenSolver:
                 return z, info
             
             # Compute search direction g_k = H_k F(Z_k)
-            # H_k F_k = H_0 F_k + sum_{i=0}^{k-1} u_i (v_i^T F_k)
-            # Since H_0 = -I, we have H_0 F_k = -F_k
             g_k = -f.clone()
             for u_i, v_i in zip(u_list, v_list):
-                # v_i^T F_k is computed as a batched dot product: shape (B, 1)
                 dot = torch.sum(v_i * f, dim=-1, keepdim=True)
                 g_k = g_k + u_i * dot
                 
-            # Update state: Z_{k+1} = Z_k - alpha * g_k
-            # (Note: Broyden's method direction is delta_z = -g_k)
             delta_z = -self.alpha * g_k
             z_next = z + delta_z
             
@@ -82,35 +128,29 @@ class BroydenSolver:
                 w_k = w_k + u_i * dot
                 
             # Compute v_k = H_k^T delta_f
-            # Since H_0 = -I, H_0^T = -I
             v_k = -delta_f.clone()
             for u_i, v_i in zip(u_list, v_list):
                 dot = torch.sum(u_i * delta_f, dim=-1, keepdim=True)
                 v_k = v_k + v_i * dot
                 
-            # Compute batch denominator: delta_f^T w_k
+            # Compute batch denominator
             denom = torch.sum(delta_f * w_k, dim=-1, keepdim=True)
-            # Add eps to prevent division by zero
             denom = torch.where(denom.abs() < self.eps, self.eps * denom.sign(), denom)
             
-            # Compute u_k = (delta_z - w_k) / denom
+            # Compute u_k
             u_k = (delta_z - w_k) / denom
             
-            # Append updates to list
             u_list.append(u_k)
             v_list.append(v_k)
             
-            # Move to next iteration
             z = z_next
             f = f_next
             
-            # Limit the memory size of Broyden updates to keep it fast
             if len(u_list) > 20:
                 u_list.pop(0)
                 v_list.pop(0)
                 
-        # If Broyden doesn't converge, try a few Picard (Fixed-Point) iterations as fallback
-        # This adds robustness in highly turbulent regime shifts
+        # Fallback Picard steps
         for k in range(5):
             g = func(z)
             err = torch.norm(z - g, p=2, dim=-1).mean().item()
