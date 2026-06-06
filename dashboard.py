@@ -50,11 +50,11 @@ st.markdown("""
         font-weight: bold;
     }
 </style>
-""", unsafe_allowed_html=True)
+""", unsafe_allow_html=True)
 
 # App Title
-st.markdown('<div class="main-title">System 4: Stable Test-Time Adaptation Without Gradients</div>', unsafe_allowed_html=True)
-st.markdown('<div class="sub-title">Topology-Switching Coupled Equilibrium Models for Real-Time Streaming Distribution Shifts</div>', unsafe_allowed_html=True)
+st.markdown('<div class="main-title">System 4: Stable Test-Time Adaptation Without Gradients</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Topology-Switching Coupled Equilibrium Models for Real-Time Streaming Distribution Shifts</div>', unsafe_allow_html=True)
 
 # ----------------- SIDEBAR -----------------
 st.sidebar.image("https://img.icons8.com/color/144/quadcopter.png", width=80)
@@ -231,7 +231,7 @@ with tab1:
                     <div style="font-size: 12px; color: #6B7280;">Threshold: {swarm.threshold.item():.3f}</div>
                 </div>
             </div>
-            """, unsafe_allowed_html=True)
+            """, unsafe_allow_html=True)
             
             time.sleep(0.01) # fast playback
 
